@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Bot token
-API_TOKEN = "8112532328:AAGh4RgUwkNXpoGdZhvZV7Q3m4kMt0R3QzA"
+API_TOKEN = ""
 
 # Database setup
 DATABASE_URL = "sqlite+aiosqlite:///./jobs_bot.db"
