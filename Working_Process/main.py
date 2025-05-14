@@ -1,98 +1,82 @@
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-from aiogram.filters import Command
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Boolean, TIMESTAMP, func
 
-# Configure logging
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Message
+from aiogram.filters import StateFilter
+
+
+from sqlalchemy import select
+
+from db import engine, Base, async_session
+from models import Source
+from registration import (
+    handle_start_command, handle_register, handle_authorize,
+    process_full_name, process_username, process_password,
+    process_login_tgid, process_login_password,
+    RegisterForm, LoginForm
+)
+
+# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bot token
-API_TOKEN = ""
-
-# Database setup
-DATABASE_URL = "sqlite+aiosqlite:///./jobs_bot.db"
-engine = create_async_engine(DATABASE_URL, echo=True)
-Base = declarative_base()
-async_session = sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
-)
-
-class Source(Base):
-    __tablename__ = 'sources'
-    id = Column(Integer, primary_key=True)
-    url = Column(String, unique=True, nullable=False)
-    active = Column(Boolean, default=True, nullable=False)
-    added_at = Column(TIMESTAMP, server_default=func.current_timestamp())
-
-class UserFilter(Base):
-    __tablename__ = 'user_filters'
-    id = Column(Integer, primary_key=True)
-    telegram_id = Column(Integer, nullable=False)
-    keywords = Column(String, default='')
-    updated_at = Column(TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
-
+# Инициализация БД
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-# Bot setup
 async def main():
     await init_db()
 
-    bot = Bot(token=API_TOKEN)
-    dp = Dispatcher()
+    bot = Bot(token="8112532328:AAGh4RgUwkNXpoGdZhvZV7Q3m4kMt0R3QzA")
+    dp = Dispatcher(storage=MemoryStorage())
 
-    # /start handler
-    @dp.message(Command(commands=['start']))
-    async def cmd_start(message: Message):
-        await message.answer(
-            "Привет! Я бот для поиска вакансий. Многие команды — /add_site, /list_sites, /set_keywords."
-        )
+    # /start и кнопки
+    dp.message.register(handle_start_command, Command("start"))
+    dp.callback_query.register(handle_register, F.data == "register")
+    dp.callback_query.register(handle_authorize, F.data == "authorize")
 
-    # /add_site handler
-    @dp.message(Command(commands=['add_site']))
+    # Регистрация через FSM: теперь с явным StateFilter
+    dp.message.register(process_full_name, StateFilter(RegisterForm.full_name))
+    dp.message.register(process_username, StateFilter(RegisterForm.username))
+    dp.message.register(process_password, StateFilter(RegisterForm.password))
+
+    # Авторизация через FSM
+    dp.message.register(process_login_tgid, StateFilter(LoginForm.telegram_id))
+    dp.message.register(process_login_password, StateFilter(LoginForm.password))
+    # Примеры остальных команд
+    @dp.message(Command("add_site"))
     async def cmd_add_site(message: Message):
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
-            await message.reply("Использование: /add_site <URL>")
-            return
+            return await message.reply("Использование: /add_site <URL>")
         url = parts[1].strip()
         async with async_session() as session:
-            exists = await session.scalar(
-                session.query(Source).filter_by(url=url).exists()
-            )
-            if exists:
+            result = await session.execute(select(Source).where(Source.url == url))
+            if result.scalar_one_or_none():
                 await message.reply("Этот источник уже добавлен.")
             else:
-                source = Source(url=url)
-                session.add(source)
+                session.add(Source(url=url))
                 await session.commit()
                 await message.reply(f"Источник {url} успешно добавлен.")
 
-    # /list_sites handler
-    @dp.message(Command(commands=['list_sites']))
+    @dp.message(Command("list_sites"))
     async def cmd_list_sites(message: Message):
         async with async_session() as session:
-            result = await session.execute(session.query(Source))
+            result = await session.execute(select(Source))
             sources = result.scalars().all()
         if not sources:
-            await message.reply("Список источников пуст.")
-        else:
-            text = "Отслеживаемые источники:\n" + "\n".join(
-                f"- {s.url} (active={s.active})" for s in sources
-            )
-            await message.reply(text)
+            return await message.reply("Список источников пуст.")
+        lines = [f"- {s.url} (active={s.active})" for s in sources]
+        await message.reply("Отслеживаемые источники:\n" + "\n".join(lines))
 
-    # start polling
     try:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
